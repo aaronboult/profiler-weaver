@@ -10,9 +10,6 @@ namespace ProfilerWeaver;
 
 public static class ProfilerWeaver
 {
-    private const string BeginMethodName = "BeginSample";
-    private const string EndMethodName = "EndSample";
-
     private enum WeaveMethodResult
     {
         Skipped,
@@ -20,74 +17,54 @@ public static class ProfilerWeaver
         Success
     }
 
-    public static void Main(string[] args)
+    public static int Main(string[] rawArgs)
     {
         try
         {
-            LogLine($"ProfilerWeaver starting with args: {string.Join(' ', args)}");
+            LogLine($"ProfilerWeaver starting with args: {string.Join(' ', rawArgs)}");
 
-            // expect assemblyPath, outputPath, managerClassName
-            if (args.Length != 4)
+            var args = ValidateArgs(rawArgs);
+
+            if (!args.IsValid)
             {
-                var message = $"Expected 4 arguments (assemblyPath, outputPath, managerClassName, whitelistNamespaces), " +
-                              $"got {args.Length}: {string.Join(", ", args)}";
-
-                // remember to initialize the log before we output error
-                InitializeLog(string.Empty);
-                LogLine(message);
-
-                throw new ArgumentException(message);
+                LogLine($"Failed to validate arguments, exiting");
+                return 1;
             }
 
-            // validate args
-            var assemblyPath = args[0];
-            var outputPath = args[1];
-            var managerClassName = args[2];
-            var whitelistNamespaces = args[3];
-
-            InitializeLog(assemblyPath);
-
-            if (!File.Exists(assemblyPath))
-            {
-                var message = $"Error: Assembly not found at {assemblyPath}";
-
-                LogLine(message);
-                throw new ArgumentException(message);
-            }
-
-            if (string.IsNullOrWhiteSpace(managerClassName))
-            {
-                const string message = "Error: Manager class name cannot be null, empty or whitespace";
-
-                LogLine(message);
-                throw new ArgumentException(message);
-            }
-
-            var whitelistedNamespaces = whitelistNamespaces.Split(",");
-
-            LogLine($"Beginning weaving of {assemblyPath} using {managerClassName}");
-            LogLine($"Whitelisted namespaces: \n\t{string.Join("\n\t", whitelistedNamespaces)}");
+            LogLine(
+                $"Beginning weaving of {args.AssemblyPath} using {args.ManagerClassName}:",
+                $"\t- Whitelisted namespaces: {args.RawWhitelistNamespaces}",
+                $"\t- Begin method name: {args.BeginMethodName}",
+                $"\t- End method name: {args.EndMethodName}"
+            );
 
             var timer = Stopwatch.StartNew();
 
-            Weave(assemblyPath, outputPath, managerClassName, whitelistedNamespaces);
+            if (!Weave(args))
+            {
+                timer.Stop();
+
+                LogLine($"Weaving failed after {timer.ElapsedMilliseconds}ms");
+                return 1;
+            }
 
             timer.Stop();
 
-            LogLine($"Weaving complete, took: {timer.ElapsedMilliseconds}ms");
+            LogLine($"Weaving complete after {timer.ElapsedMilliseconds}ms");
         }
         catch (Exception e)
         {
-            var message = $"Error: Weaving failed: {e.Message}\n{e.StackTrace}";
-
-            Console.WriteLine(message);
-            LogLine(message);
+            LogLine($"Error: Weaving failed: {e.Message}\n{e.StackTrace}");
+            return 1;
         }
         finally
         {
             CloseLog();
         }
+
+        return 0;
     }
+
     #region Arguments
 
     private readonly struct Arguments(
@@ -250,7 +227,7 @@ public static class ProfilerWeaver
 
         foreach (var message in messages)
         {
-            // apply indent to newlines in message
+            // apply indent to newlines
             var indentedMessage = indentString + message.Replace("\n", $"\n{indentString}");
 
             BufferedLogLines.Add($"{indentedMessage}\n");
@@ -266,18 +243,16 @@ public static class ProfilerWeaver
         {
             try
             {
-                // This is the idiomatic and correct way to create a consumer.
-                // It blocks until an item is available or the collection is marked as complete.
                 foreach (var nextLine in BufferedLogLines.GetConsumingEnumerable(_loggingTaskCancellation))
                 {
-                    // Use UTF8 for better compatibility and get the correct byte count.
+                    // Use UTF8 for better compatibility
                     var bytes = Encoding.UTF8.GetBytes(nextLine);
                     _logStream?.Write(bytes, 0, bytes.Length);
                 }
             }
             catch (OperationCanceledException)
             {
-                // This is expected if the task is cancelled. The loop will terminate.
+                // This is expected if the task is cancelled, the loop will terminate.
             }
             finally
             {
@@ -312,6 +287,7 @@ public static class ProfilerWeaver
         {
             LogLine("Exception Handlers:");
             IncreaseIndent();
+
             foreach (var handler in body.ExceptionHandlers)
             {
                 LogLine(
@@ -322,63 +298,75 @@ public static class ProfilerWeaver
                     $"\tHandlerEnd: IL_{handler.HandlerEnd?.Offset:X4}"
                 );
             }
+
             DecreaseIndent();
         }
 
         LogLine("Instructions:");
         IncreaseIndent();
+
         foreach (var instruction in body.Instructions)
         {
             var operandString = "";
-            if (instruction.Operand is Instruction targetInstruction)
+
+            switch (instruction.Operand)
             {
-                operandString = $"IL_{targetInstruction.Offset:X4}";
-            }
-            else if (instruction.Operand is Instruction[] targetInstructions)
-            {
-                operandString = $"({string.Join(", ", targetInstructions.Select(i => $"IL_{i.Offset:X4}"))})";
-            }
-            else if (instruction.Operand != null)
-            {
-                operandString = instruction.Operand.ToString();
+                case Instruction targetInstruction:
+                    operandString = $"IL_{targetInstruction.Offset:X4}";
+                    break;
+
+                case Instruction[] targetInstructions:
+                    operandString = $"({string.Join(", ", targetInstructions.Select(i => $"IL_{i.Offset:X4}"))})";
+                    break;
+
+                default:
+                {
+                    if (instruction.Operand != null)
+                    {
+                        operandString = instruction.Operand.ToString();
+                    }
+
+                    break;
+                }
             }
 
             LogLine($"IL_{instruction.Offset:X4}: {instruction.OpCode.Name} {operandString}");
         }
-        DecreaseIndent();
 
+        DecreaseIndent();
         LogLine($"--- END IL DUMP FOR {method.FullName} ---");
         DecreaseIndent();
     }
 
     #endregion
 
-    private static MethodDefinition? GetBeginMethod(TypeDefinition type)
+    #region Injection
+
+    private static MethodDefinition? GetBeginMethod(string beginMethodName, TypeDefinition type)
     {
         return type.Methods.FirstOrDefault(
-            m => m.Name == BeginMethodName && m.Parameters.Count == 1
+            m => m.Name == beginMethodName && m.Parameters.Count == 1
                                          && m.Parameters[0].ParameterType.FullName == "System.String"
         );
     }
 
-    private static MethodDefinition? GetEndMethod(TypeDefinition type)
+    private static MethodDefinition? GetEndMethod(string endMethodName, TypeDefinition type)
     {
-        return type.Methods.FirstOrDefault(m => m.Name == EndMethodName && m.Parameters.Count == 0);
+        return type.Methods.FirstOrDefault(m => m.Name == endMethodName && m.Parameters.Count == 0);
     }
 
-    private static void Weave(string assemblyPath, string outputPath, string managerClassName,
-        string[] whitelistNamespaces)
+    private static bool Weave(Arguments args)
     {
         var resolver = new DefaultAssemblyResolver();
 
-        resolver.AddSearchDirectory(Path.GetDirectoryName(assemblyPath));
+        resolver.AddSearchDirectory(Path.GetDirectoryName(args.AssemblyPath));
 
         var readParameters = new ReaderParameters
         {
             AssemblyResolver = resolver
         };
 
-        var pdbPath = Path.ChangeExtension(assemblyPath, ".pdb");
+        var pdbPath = Path.ChangeExtension(args.AssemblyPath, ".pdb");
         var tryReadSymbols = File.Exists(pdbPath);
 
         if (tryReadSymbols)
@@ -402,57 +390,62 @@ public static class ProfilerWeaver
         {
             try
             {
-                assembly = AssemblyDefinition.ReadAssembly(assemblyPath, readParameters);
+                assembly = AssemblyDefinition.ReadAssembly(args.AssemblyPath, readParameters);
             }
             catch (Exception ex)
             {
-                // Check for the specific "symbols not matching" error
+                // check for the specific "symbols not matching" error
                 if (tryReadSymbols && ex.Message.Contains("Symbols were found but are not matching the assembly"))
                 {
-                    LogLine($"WARNING: Symbols for '{assemblyPath}' were found but do not match the assembly");
+                    LogLine($"WARNING: Symbols for '{args.AssemblyPath}' were found but do not match the assembly");
                     LogLine($"Attempting to re-read assembly WITHOUT symbols. Original error: {ex.Message}");
 
                     // Re-attempt to read without symbols
                     readParameters.ReadSymbols = false; // Disable symbol reading
-                    assembly = AssemblyDefinition.ReadAssembly(assemblyPath, readParameters); // Try reading again
+                    assembly = AssemblyDefinition.ReadAssembly(args.AssemblyPath, readParameters); // Try reading again
                 }
                 else
                 {
-                    // Re-throw if it's a different kind of error
-                    LogLine($"FATAL ERROR: Unexpected error while reading assembly '{assemblyPath}'. Error: {ex.Message}");
-                    throw;
+                    // this is bad
+                    LogLine($"FATAL ERROR: Unexpected error while reading assembly '{args.AssemblyPath}'. " +
+                            $"Error: {ex.Message}");
+
+                    return false;
                 }
             }
 
-            // If assembly is still null here, something went wrong in the catch block
+            // if assembly is still null here, it means something whacky occurred
             if (assembly == null)
             {
-                throw new InvalidOperationException($"Failed to load assembly '{assemblyPath}' after multiple attempts.");
+                LogLine($"Failed to load assembly '{args.AssemblyPath}' after " +
+                        $"multiple attempts");
+                return false;
             }
 
             var mainModule = assembly.MainModule;
 
-            var profilerManagerType = mainModule.Types.FirstOrDefault(t => t.FullName == managerClassName);
+            var profilerManagerType = mainModule.Types.FirstOrDefault(
+                t => t.FullName == args.ManagerClassName
+            );
+
             if (profilerManagerType == null)
             {
-                var message = $"Error: Could not find {managerClassName} type in {assemblyPath}";
+                var message = $"Error: Could not find {args.ManagerClassName} type in {args.AssemblyPath}";
 
                 LogLine(message);
-                throw new ArgumentException(message);
+                return false;
             }
 
-            LogLine($"Profiler manager type {managerClassName} successfully resolved: {profilerManagerType}");
+            LogLine($"Profiler manager type {args.ManagerClassName} successfully resolved: {profilerManagerType}");
 
             // Get method references
-            var beginSampleMethodDef = GetBeginMethod(profilerManagerType);
-            var endSampleMethodDef = GetEndMethod(profilerManagerType);
+            var beginSampleMethodDef = GetBeginMethod(args.BeginMethodName, profilerManagerType);
+            var endSampleMethodDef = GetEndMethod(args.EndMethodName, profilerManagerType);
 
             if (beginSampleMethodDef == null || endSampleMethodDef == null)
             {
-                const string message = "Error: Could not find BeginSample or EndSample methods in YourProfilerManager.";
-
-                LogLine(message);
-                throw new ArgumentException(message);
+                LogLine($"Error: Could not find {args.BeginMethodName}");
+                return false;
             }
 
             LogLine($"Begin and End method definitions successfully resolved: {beginSampleMethodDef}, {endSampleMethodDef}");
@@ -483,7 +476,7 @@ public static class ProfilerWeaver
                         continue;
 
                     // check whitelist
-                    if (!whitelistNamespaces.Any(n => type.Namespace.StartsWith(n)))
+                    if (!args.WhitelistNamespaces.Any(n => type.Namespace.StartsWith(n)))
                     {
                         LogLine($"Type {type.FullName} in namespace {type.Namespace} is not whitelisted, skipping");
                         continue;
@@ -511,7 +504,8 @@ public static class ProfilerWeaver
 
                         if (result == WeaveMethodResult.Error)
                         {
-                            throw new Exception($"Failed to weave method {method.FullName}");
+                            LogLine($"Failed to weave method {method.FullName}");
+                            return false;
                         }
 
                         LogLine(string.Join("", Enumerable.Repeat("=", 80)));
@@ -525,15 +519,18 @@ public static class ProfilerWeaver
 
             DecreaseIndent();
 
-            LogLine($"Weaving for assembly {assemblyPath} completed, writing to {outputPath}. Include symbols " +
-                    $"{writeParameters.WriteSymbols}");
+            LogLine($"Weaving for assembly {args.AssemblyPath} completed, writing " +
+                    (writeParameters.WriteSymbols ? "PDB and " : string.Empty) +
+                    $"DLL to {args.OutputPath}");
 
-            assembly.Write(outputPath, writeParameters);
+            assembly.Write(args.OutputPath, writeParameters);
         }
         finally
         {
             assembly?.Dispose();
         }
+
+        return true;
     }
 
     private static WeaveMethodResult WeaveMethod(MethodDefinition method,
@@ -541,7 +538,7 @@ public static class ProfilerWeaver
     {
         try
         {
-            // skip no body, abstract, or native code
+            // skip methods without body, abstract, or native code
             if (!method.HasBody || method.Body == null || method.Body.Instructions.Count == 0
                                 || method.IsAbstract || method.IsPInvokeImpl)
             {
@@ -589,15 +586,18 @@ public static class ProfilerWeaver
             }
 
             // inject begin sample call
-            il.InsertBefore(originalFirstInstruction, il.Create(OpCodes.Ldstr, $"{method.DeclaringType.FullName}.{method.Name}"));
-            il.InsertBefore(originalFirstInstruction, il.Create(OpCodes.Call, beginSampleMethodRef));
+            il.InsertBefore(originalFirstInstruction,
+                il.Create(OpCodes.Ldstr, $"{method.DeclaringType.FullName}.{method.Name}"));
+
+            il.InsertBefore(originalFirstInstruction,
+                il.Create(OpCodes.Call, beginSampleMethodRef));
 
             // inject finally block
             var finallyStart = il.Create(OpCodes.Call, endSampleMethodRef);
             il.Append(finallyStart);
             il.Append(il.Create(OpCodes.Endfinally));
 
-            // keep track of where the finally end should live
+            // keep track of where the finally block end should live
             var finallyEnd = il.Create(OpCodes.Nop);
             il.Append(finallyEnd);
 
@@ -626,9 +626,9 @@ public static class ProfilerWeaver
             var handler = new ExceptionHandler(ExceptionHandlerType.Finally)
             {
                 TryStart = originalFirstInstruction,
-                TryEnd = finallyStart, // The 'try' block ends just before the 'finally' block. This is the fix.
+                TryEnd = finallyStart, // the 'try' block ends just before the 'finally' block
                 HandlerStart = finallyStart,
-                HandlerEnd = finallyEnd // The handler's scope ends just before our new return sequence.
+                HandlerEnd = finallyEnd // the handler's scope ends just before our return sequence
             };
 
             body.ExceptionHandlers.Add(handler);
@@ -655,4 +655,6 @@ public static class ProfilerWeaver
 
         return WeaveMethodResult.Success;
     }
+
+    #endregion
 }
