@@ -88,6 +88,101 @@ public static class ProfilerWeaver
             CloseLog();
         }
     }
+    #region Arguments
+
+    private readonly struct Arguments(
+        string assemblyPath,
+        string outputPath,
+        string managerClassName,
+        string[] whitelistNamespaces,
+        string rawWhitelistNamespaces,
+        string beginMethodName,
+        string endMethodName,
+        bool isValid
+    )
+    {
+        public string AssemblyPath { get; } = assemblyPath;
+        public string OutputPath { get; } = outputPath;
+        public string ManagerClassName { get; } = managerClassName;
+        public string[] WhitelistNamespaces { get; } = whitelistNamespaces;
+        public string RawWhitelistNamespaces { get; } = rawWhitelistNamespaces;
+        public string BeginMethodName { get; } = beginMethodName;
+        public string EndMethodName { get; } = endMethodName;
+        public bool IsValid { get; } = isValid;
+    }
+
+    /// <summary>
+    /// Responsible for validating command line arguments and initializing the log according to argument validity
+    /// </summary>
+    private static Arguments ValidateArgs(string[] args)
+    {
+        const int expectedArgs = 6;
+
+        if (args.Length != expectedArgs)
+        {
+            // remember to initialize the log before we output error
+            InitializeLog(string.Empty);
+            LogLine(
+                $"Expected {expectedArgs} arguments in order:",
+                $"\t- assemblyPath",
+                $"\t- outputPath",
+                $"\t- managerClassName",
+                $"\t- whitelistNamespaces",
+                $"\t- beginMethodName",
+                $"\t- endMethodName",
+                $"\nGot {args.Length}: {string.Join(", ", args)}"
+            );
+
+            return default;
+        }
+
+        // validate args
+        var assemblyPath = args[0];
+        var outputPath = args[1];
+        var managerClassName = args[2];
+        var rawWhitelistNamespaces = args[3];
+        var beginMethodName = args[4];
+        var endMethodName = args[5];
+
+        InitializeLog(assemblyPath);
+
+        if (!File.Exists(assemblyPath))
+        {
+            LogLine($"Error: Assembly not found at {assemblyPath}");
+            return default;
+        }
+
+        if (!Directory.Exists(Path.GetDirectoryName(outputPath)))
+        {
+            LogLine($"Error: Output directory not found at {Path.GetDirectoryName(outputPath)}");
+            return default;
+        }
+
+        if (string.IsNullOrWhiteSpace(managerClassName))
+        {
+            LogLine("Error: Manager class name cannot be null, empty or whitespace");
+            return default;
+        }
+
+        if (string.IsNullOrWhiteSpace(beginMethodName))
+        {
+            LogLine("Error: Begin method name cannot be null, empty or whitespace");
+            return default;
+        }
+
+        if (string.IsNullOrWhiteSpace(endMethodName))
+        {
+            LogLine("Error: End method name cannot be null, empty or whitespace");
+            return default;
+        }
+
+        var whitelistedNamespaces = rawWhitelistNamespaces.Split(",");
+
+        return new Arguments(assemblyPath, outputPath, managerClassName, whitelistedNamespaces, rawWhitelistNamespaces,
+            beginMethodName, endMethodName, true);
+    }
+
+    #endregion
 
     #region Logging
 
