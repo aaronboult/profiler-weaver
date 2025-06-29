@@ -539,17 +539,16 @@ public static class ProfilerWeaver
         try
         {
             // skip methods without body, abstract, or native code
-            if (!method.HasBody || method.Body == null || method.Body.Instructions.Count == 0
-                                || method.IsAbstract || method.IsPInvokeImpl)
+            if (!method.HasBody || method.Body == null || method.Body.Instructions.Count == 0)
             {
-                LogLine($"Skipping method {method.FullName} (no body/abstract/external)");
+                LogLine($"Skipping method {method.FullName} (no body)");
                 return WeaveMethodResult.Skipped;
             }
 
             // skip constructors and platform invoke
-            if (method.IsConstructor || method.IsPInvokeImpl)
+            if (method.IsConstructor || method.IsPInvokeImpl || method.IsAbstract)
             {
-                LogLine($"Skipping constructor/platform invoke for {method.DeclaringType.Name}");
+                LogLine($"Skipping method {method.FullName} (constructor/platform invoke/abstract)");
                 return WeaveMethodResult.Skipped;
             }
 
